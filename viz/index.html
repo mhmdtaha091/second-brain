@@ -581,12 +581,13 @@ let handLandmarker = null;
 
 // Gesture state machine
 let gestureState = {
-  wasPinching: false,      // was pinching last frame?
-  pinchStartSize: 0,       // hand size when pinch began
-  pinchStartZ: 0,          // camera distance when pinch began
-  prevHandAngle: 0,        // for twist detection
+  wasPinching: false,
+  pinchStartSize: 0,
+  pinchStartZ: 0,
+  prevHandAngle: 0,
   prevWristX: 0,
   prevWristY: 0,
+  frameSkip: 0,            // throttle MediaPipe to every 3rd frame
 };
 
 // ── Three.js Setup ────────────────────────────
@@ -974,7 +975,7 @@ let handsStream = null;
 async function toggleWebcamAR() {
   if (webcamARActive) { stopWebcamAR(); return; }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: 'user' } });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } });
     arVideo.srcObject = stream;
     await arVideo.play();
 
@@ -1031,7 +1032,6 @@ async function initHandTracking() {
         await handsVideo.play();
       } catch(e) { console.warn('Camera for hands failed:', e); }
     }
-    requestAnimationFrame(detectHands);
     return;
   }
   try {
@@ -1051,7 +1051,6 @@ async function initHandTracking() {
     handTrackingActive = true;
     document.getElementById('gesture-indicator').style.display = 'block';
     console.log('Hand tracking ready — show your hand to the camera');
-    requestAnimationFrame(detectHands);
   } catch(err) {
     console.error('MediaPipe load error:', err);
     handTrackingActive = false;
@@ -1061,20 +1060,28 @@ async function initHandTracking() {
 
 function detectHands() {
   if (!handTrackingActive || !handLandmarker) return;
-  // Use handsVideo (dedicated stream) if available, otherwise fallback to AR video
+
+  // Throttle: only run MediaPipe every 3rd frame
+  gestureState.frameSkip = (gestureState.frameSkip || 0) + 1;
+  if (gestureState.frameSkip % 3 !== 0) return;
+
   const video = handsVideo.srcObject ? handsVideo : (webcamARActive ? arVideo : null);
-  if (!video || video.readyState < 2) { requestAnimationFrame(detectHands); return; }
-  const results = handLandmarker.detectForVideo(video, performance.now());
-  if (results.landmarks?.length > 0) {
-    processGestures(results.landmarks);
-    document.getElementById('gesture-indicator').style.opacity = '1';
-    handCanvas.style.display = 'block';
-  } else {
-    document.getElementById('gesture-indicator').style.opacity = '0.4';
-    handCanvas.style.display = 'none';
-    handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+  if (!video || video.readyState < 2) return;
+
+  try {
+    const results = handLandmarker.detectForVideo(video, performance.now());
+    if (results.landmarks?.length > 0) {
+      processGestures(results.landmarks);
+      document.getElementById('gesture-indicator').style.opacity = '1';
+      handCanvas.style.display = 'block';
+    } else {
+      document.getElementById('gesture-indicator').style.opacity = '0.4';
+      handCanvas.style.display = 'none';
+      handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+    }
+  } catch(e) {
+    // MediaPipe can throw if called too fast — ignore
   }
-  requestAnimationFrame(detectHands);
 }
 
 // Hand skeleton connections (MediaPipe hand topology)
@@ -1298,6 +1305,10 @@ function animate() {
       if (m.material?.opacity !== undefined) m.material.opacity = 0.45 + Math.sin(Date.now()*0.005)*0.25;
     }
   });
+
+  // Hand detection integrated into main loop (throttled internally)
+  if (handTrackingActive) detectHands();
+
   composer.render();
   labelRenderer.render(scene, camera);
 }
