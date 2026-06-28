@@ -105,6 +105,13 @@ body {
 }
 canvas { display: block; }
 
+/* Hand skeleton overlay */
+#hand-overlay {
+  position: fixed; inset: 0; z-index: 8;
+  pointer-events: none;
+  display: none;
+}
+
 /* ═══════════════════════════════════════════════
    HUD OVERLAY
    ═══════════════════════════════════════════════ */
@@ -484,6 +491,7 @@ canvas { display: block; }
 <body>
 
 <div id="canvas-container"></div>
+<canvas id="hand-overlay"></canvas>
 
 <div id="hud">
   <!-- Top Bar -->
@@ -997,6 +1005,8 @@ function stopWebcamAR() {
   document.getElementById('gesture-indicator').style.display = 'none';
   document.getElementById('ar-vignette').classList.remove('active');
   document.getElementById('ar-scanlines').classList.remove('active');
+  handCanvas.style.display = 'none';
+  handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
 }
 
 // ── Hand Tracking (works standalone or with AR) ──
@@ -1049,11 +1059,110 @@ function detectHands() {
   if (results.landmarks?.length > 0) {
     processGestures(results.landmarks);
     document.getElementById('gesture-indicator').style.opacity = '1';
+    handCanvas.style.display = 'block';
   } else {
-    // Fade indicator when no hand seen
     document.getElementById('gesture-indicator').style.opacity = '0.4';
+    handCanvas.style.display = 'none';
+    handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
   }
   requestAnimationFrame(detectHands);
+}
+
+// Hand skeleton connections (MediaPipe hand topology)
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],         // thumb
+  [0,5],[5,6],[6,7],[7,8],         // index
+  [0,9],[9,10],[10,11],[11,12],    // middle
+  [0,13],[13,14],[14,15],[15,16],  // ring
+  [0,17],[17,18],[18,19],[19,20],  // pinky
+  [5,9],[9,13],[13,17],            // palm
+];
+
+const handCanvas = document.getElementById('hand-overlay');
+const handCtx = handCanvas.getContext('2d');
+
+function resizeHandCanvas() {
+  handCanvas.width = window.innerWidth;
+  handCanvas.height = window.innerHeight;
+}
+resizeHandCanvas();
+window.addEventListener('resize', resizeHandCanvas);
+
+function drawHandSkeleton(landmarks) {
+  const w = handCanvas.width;
+  const h = handCanvas.height;
+  handCtx.clearRect(0, 0, w, h);
+
+  // Use the video dimensions for aspect-aware mapping
+  // Webcam is mirrored (facing user), so flip X
+  const videoW = 640;
+  const videoH = 480;
+  const scale = Math.min(w / videoW, h / videoH);
+  const offsetX = (w - videoW * scale) / 2;
+  const offsetY = (h - videoH * scale) / 2;
+
+  function toScreen(lm) {
+    return [
+      offsetX + (1 - lm.x) * videoW * scale,  // flip X for mirror
+      offsetY + lm.y * videoH * scale,
+    ];
+  }
+
+  // Draw each hand
+  for (const hand of landmarks) {
+    // Draw connections (bones)
+    for (const [a, b] of HAND_CONNECTIONS) {
+      const [ax, ay] = toScreen(hand[a]);
+      const [bx, by] = toScreen(hand[b]);
+      // Glow layer
+      handCtx.beginPath();
+      handCtx.moveTo(ax, ay);
+      handCtx.lineTo(bx, by);
+      handCtx.strokeStyle = 'rgba(0,229,255,0.3)';
+      handCtx.lineWidth = 6;
+      handCtx.lineCap = 'round';
+      handCtx.stroke();
+      // Core line
+      handCtx.beginPath();
+      handCtx.moveTo(ax, ay);
+      handCtx.lineTo(bx, by);
+      handCtx.strokeStyle = 'rgba(0,229,255,0.9)';
+      handCtx.lineWidth = 2;
+      handCtx.stroke();
+    }
+
+    // Draw landmarks (joints)
+    for (const lm of hand) {
+      const [x, y] = toScreen(lm);
+      // Outer glow
+      handCtx.beginPath();
+      handCtx.arc(x, y, 6, 0, Math.PI * 2);
+      handCtx.fillStyle = 'rgba(0,229,255,0.25)';
+      handCtx.fill();
+      // Inner dot
+      handCtx.beginPath();
+      handCtx.arc(x, y, 3, 0, Math.PI * 2);
+      handCtx.fillStyle = '#00E5FF';
+      handCtx.fill();
+      handCtx.shadowColor = '#00E5FF';
+      handCtx.shadowBlur = 8;
+      handCtx.fill();
+      handCtx.shadowBlur = 0;
+    }
+
+    // Highlight fingertips bigger
+    for (const tipIdx of [4, 8, 12, 16, 20]) {
+      const [x, y] = toScreen(hand[tipIdx]);
+      handCtx.beginPath();
+      handCtx.arc(x, y, 5, 0, Math.PI * 2);
+      handCtx.fillStyle = '#FFFFFF';
+      handCtx.fill();
+      handCtx.shadowColor = '#00E5FF';
+      handCtx.shadowBlur = 14;
+      handCtx.fill();
+      handCtx.shadowBlur = 0;
+    }
+  }
 }
 
 function processGestures(landmarks) {
@@ -1069,6 +1178,10 @@ function processGestures(landmarks) {
   if (g.includes('GRAB')) { controls.autoRotate = false; controls.rotateLeft(-(h[9].x-0.5)*0.2); controls.rotateUp(-(h[9].y-0.5)*0.15); }
   else if (g.includes('PINCH')) camera.position.multiplyScalar(0.994);
   else if (g.includes('POINT')) camera.position.multiplyScalar(1.006);
+
+  // Draw hand skeleton overlay
+  handCanvas.style.display = 'block';
+  drawHandSkeleton(landmarks);
 }
 
 // ── Buttons ───────────────────────────────────
