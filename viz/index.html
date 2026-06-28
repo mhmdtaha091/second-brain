@@ -1249,13 +1249,23 @@ function processGestures(landmarks) {
 
     label = `PINCH — dist: ${newDist.toFixed(0)} · twist to rotate`;
   } else if (fist) {
-    // ── FIST MODE: grab and drag to rotate ──
+    // ── FIST MODE: grab and drag to pan/move the graph ──
     controls.autoRotate = false;
     const dx = h[9].x - gs.prevWristX;
     const dy = h[9].y - gs.prevWristY;
-    if (Math.abs(dx) > 0.005) controls.rotateLeft(-dx * 8);
-    if (Math.abs(dy) > 0.005) controls.rotateUp(-dy * 6);
-    label = 'FIST — drag to rotate';
+    if (Math.abs(dx) > 0.003 || Math.abs(dy) > 0.003) {
+      // Pan: move the camera target (what we're looking at)
+      const panSpeed = camera.position.length() * 0.015;
+      const right = new THREE.Vector3();
+      const up = new THREE.Vector3();
+      camera.getWorldDirection(new THREE.Vector3());
+      right.crossVectors(camera.getWorldDirection(new THREE.Vector3()), camera.up).normalize();
+      up.copy(camera.up).normalize();
+      controls.target.addScaledVector(right, -dx * panSpeed);
+      controls.target.addScaledVector(up, dy * panSpeed);
+    }
+
+    label = `FIST — drag to pan`;
   }
 
   // Track state for next frame
