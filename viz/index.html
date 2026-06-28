@@ -212,6 +212,7 @@
     backdrop-filter: blur(20px);
   }
   #legend .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  #legend .dot.project { background: #ffdd00; box-shadow: 0 0 12px #ffdd00; }
   #legend .dot.hub { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
   #legend .dot.normal { background: var(--accent2); }
   #legend .dot.orphan { background: var(--accent3); }
@@ -267,10 +268,11 @@
 
   <!-- Legend -->
   <div id="legend">
-    <div><span class="dot hub"></span> Hub (highly connected)</div>
-    <div><span class="dot normal"></span> Note</div>
+    <div><span class="dot project"></span> Project</div>
+    <div><span class="dot hub"></span> Hub (connected)</div>
+    <div><span class="dot normal"></span> File / Note</div>
     <div><span class="dot orphan"></span> Orphan (unlinked)</div>
-    <div style="margin-top:6px;color:var(--muted)">🖱️ Drag to rotate | Scroll to zoom</div>
+    <div style="margin-top:6px;color:var(--muted)">Drag to rotate | Scroll to zoom</div>
     <div style="color:var(--muted)">Click node for details</div>
   </div>
 
@@ -419,21 +421,27 @@ scene.add(grid);
 // ──────────────────────────────────────
 
 function getNodeColor(node, alpha = 1) {
+  // Project nodes are golden
+  if (node.type === 'project') return new THREE.Color('#ffdd00');
+
   if (tagColorMode && node.tags && node.tags.length > 0) {
-    // Hash the first tag to a color
     const hash = node.tags[0].split('').reduce((a, c) => a + c.charCodeAt(0), 0);
     const hue = (hash * 137.5) % 360;
     return new THREE.Color(`hsl(${hue}, 70%, 60%)`);
   }
   const degree = node.degree || 0;
-  if (degree >= 4) return new THREE.Color('#00f0ff');  // hub - cyan
+  if (degree >= 5) return new THREE.Color('#00f0ff');  // hub - cyan
   if (degree === 0) return new THREE.Color('#ff3d7f'); // orphan - pink
   return new THREE.Color('#b44dff');                    // normal - purple
 }
 
 function getNodeSize(node) {
+  if (node.type === 'project') {
+    const degree = node.degree || 0;
+    return Math.max(0.8, Math.min(2.0, 1.0 + degree * 0.03));
+  }
   const degree = node.degree || 0;
-  return Math.max(0.25, Math.min(1.2, 0.3 + degree * 0.12));
+  return Math.max(0.15, Math.min(0.7, 0.2 + degree * 0.06));
 }
 
 function clearGraph() {
@@ -505,18 +513,31 @@ function buildGraphVisuals() {
   }
 
   // ── Create meshes ──
+  const PROJECT_COLORS = [
+    '#ffdd00', '#00f0ff', '#b44dff', '#ff3d7f', '#00ff88',
+    '#ff8800', '#88ddff', '#ff66aa', '#66ffcc', '#ffcc33',
+    '#44ddff', '#ff6699', '#aadd00', '#ff9944', '#88bbff',
+    '#ff5577', '#55dd88',
+  ];
+  const projectColorMap = {};
+  const projectNames = [...new Set(nodes.filter(n => n.type === 'project').map(n => n.label))];
+  projectNames.forEach((name, i) => {
+    projectColorMap[name] = PROJECT_COLORS[i % PROJECT_COLORS.length];
+  });
+
   nodes.forEach(node => {
     const pos = positions[node.id];
     const size = getNodeSize(node);
     const color = getNodeColor(node);
-    const geo = new THREE.SphereGeometry(size, 32, 32);
+    const isProject = node.type === 'project';
 
-    // Glow shell
-    const glowGeo = new THREE.SphereGeometry(size * 1.4, 32, 32);
+    // Outer glow (bigger for projects)
+    const glowScale = isProject ? 2.0 : 1.4;
+    const glowGeo = new THREE.SphereGeometry(size * glowScale, 32, 32);
     const glowMat = new THREE.MeshBasicMaterial({
       color: color,
       transparent: true,
-      opacity: 0.15,
+      opacity: isProject ? 0.3 : 0.12,
       depthWrite: false,
     });
     const glowMesh = new THREE.Mesh(glowGeo, glowMat);
@@ -527,24 +548,43 @@ function buildGraphVisuals() {
     // Main sphere
     const mat = new THREE.MeshStandardMaterial({
       color: color,
-      roughness: 0.3,
-      metalness: 0.7,
+      roughness: isProject ? 0.15 : 0.3,
+      metalness: isProject ? 0.9 : 0.6,
       emissive: color,
-      emissiveIntensity: 0.4,
+      emissiveIntensity: isProject ? 0.7 : 0.35,
     });
+    const geo = new THREE.SphereGeometry(size, isProject ? 48 : 32, isProject ? 48 : 32);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.copy(pos);
     mesh.userData = { nodeId: node.id, nodeData: node };
     scene.add(mesh);
     nodeMeshes.push(mesh);
 
-    // Orbit ring for hubs
-    if (node.degree >= 3) {
+    // Orbit ring(s) for projects and hubs
+    if (isProject) {
+      // Double ring for projects
+      for (let r = 0; r < 2; r++) {
+        const ringGeo = new THREE.TorusGeometry(size * (1.8 + r * 0.5), 0.03 + r * 0.01, 16, 64);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: color,
+          transparent: true,
+          opacity: 0.5 - r * 0.15,
+          depthWrite: false,
+        });
+        const ring = new THREE.Mesh(ringGeo, ringMat);
+        ring.position.copy(pos);
+        ring.rotation.x = Math.random() * Math.PI;
+        ring.rotation.y = Math.random() * Math.PI;
+        ring.userData = { nodeId: node.id, isRing: true };
+        scene.add(ring);
+        nodeMeshes.push(ring);
+      }
+    } else if (node.degree >= 4) {
       const ringGeo = new THREE.TorusGeometry(size * 1.6, 0.04, 16, 48);
       const ringMat = new THREE.MeshBasicMaterial({
         color: color,
         transparent: true,
-        opacity: 0.4,
+        opacity: 0.35,
         depthWrite: false,
       });
       const ring = new THREE.Mesh(ringGeo, ringMat);
@@ -559,17 +599,19 @@ function buildGraphVisuals() {
     // Label
     const labelDiv = document.createElement('div');
     labelDiv.textContent = node.label;
+    const labelSize = isProject ? (14 + Math.min(node.degree || 0, 30) * 0.5) : (9 + (node.degree || 0) * 1.2);
     labelDiv.style.cssText = `
       font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: ${10 + node.degree * 1.5}px;
-      color: #e0e0f0;
-      text-shadow: 0 0 8px ${'#' + color.getHexString()};
+      font-size: ${labelSize}px;
+      color: ${isProject ? '#ffdd00' : '#e0e0f0'};
+      text-shadow: 0 0 ${isProject ? '14px' : '8px'} ${'#' + color.getHexString()};
       pointer-events: none;
       white-space: nowrap;
-      font-weight: ${node.degree >= 3 ? '600' : '400'};
+      font-weight: ${isProject ? '700' : (node.degree >= 4 ? '600' : '400')};
+      ${isProject ? 'letter-spacing: 1px;' : ''}
     `;
     const label = new CSS2DObject(labelDiv);
-    label.position.copy(pos.clone().add(new THREE.Vector3(0, size + 0.6, 0)));
+    label.position.copy(pos.clone().add(new THREE.Vector3(0, size + 0.8, 0)));
     label.userData = { nodeId: node.id };
     scene.add(label);
     labelObjects.push(label);
@@ -660,36 +702,48 @@ async function showDetail(node) {
   selectedNode = node;
   const panel = document.getElementById('detail-panel');
   const content = document.getElementById('detail-content');
+  const isProject = node.type === 'project';
 
-  // Fetch full note data
-  let fullNote = node;
-  try {
-    const resp = await fetch(`/api/note/${node.path}`);
-    if (resp.ok) fullNote = await resp.json();
-  } catch (e) { /* use graph node data */ }
+  const tagHtml = (node.tags || []).slice(0, 15).map(t => `<span class="tag">#${t}</span>`).join('');
+  const degree = node.degree || 0;
+  const summary = (node.summary || node.description || '').substring(0, 400);
 
-  const tagHtml = (fullNote.tags || []).map(t => `<span class="tag">#${t}</span>`).join('');
-  const linksHtml = (fullNote.links || []).map(l =>
-    `<span class="link-item" data-link="${l}">→ ${l}</span>`
+  let typeLabel = isProject ? 'PROJECT' : (node.type || 'NOTE');
+  let typeColor = isProject ? '#ffdd00' : '#b44dff';
+
+  // Find connected nodes
+  const connectedNodes = [];
+  if (graphData) {
+    const adj = graphData.adjacency || {};
+    const neighbors = adj[node.id] || [];
+    const nodeMap = {};
+    graphData.nodes.forEach(n => { nodeMap[n.id] = n; });
+    neighbors.forEach(nid => {
+      if (nodeMap[nid]) connectedNodes.push(nodeMap[nid]);
+    });
+  }
+  const connectedHtml = connectedNodes.slice(0, 15).map(n =>
+    `<span class="link-item" data-nid="${n.id}">→ ${n.label} <span style="color:var(--muted);font-size:10px">[${n.type||''}]</span></span>`
   ).join('');
 
   content.innerHTML = `
-    <h2>${fullNote.title || node.label}</h2>
-    <div class="meta">${fullNote.path || ''} · ${fullNote.word_count || 0} words · ${(fullNote.links || []).length} links</div>
+    <h2>${node.label}</h2>
+    <div class="meta">
+      <span style="color:${typeColor};font-weight:600">${typeLabel}</span>
+      ${node.path ? ' · ' + node.path : ''}
+      ${node.project ? ' · @' + node.project : ''}
+      · ${degree} connections
+    </div>
     <div class="tags">${tagHtml || '<span style="color:var(--muted);font-size:12px">No tags</span>'}</div>
-    <div class="content">${(fullNote.summary || '').substring(0, 400)}</div>
-    ${linksHtml ? `<div class="links-section"><h3>Links</h3>${linksHtml}</div>` : ''}
+    ${summary ? `<div class="content">${summary}</div>` : ''}
+    ${connectedHtml ? `<div class="links-section"><h3>Connected (${connectedNodes.length})</h3>${connectedHtml}</div>` : ''}
   `;
 
-  // Click on link items to navigate
+  // Click on connected nodes to navigate
   content.querySelectorAll('.link-item').forEach(el => {
     el.addEventListener('click', () => {
-      const linkText = el.dataset.link;
-      // Find the target node
-      const target = graphData.nodes.find(n =>
-        n.label.toLowerCase() === linkText.toLowerCase() ||
-        n.slug === linkText.toLowerCase().replace(/\s+/g, '-')
-      );
+      const nid = el.dataset.nid;
+      const target = graphData.nodes.find(n => n.id === nid);
       if (target) showDetail(target);
     });
   });

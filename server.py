@@ -1,5 +1,5 @@
 """
-Second Brain — Local Server
+Second Brain -- Local Server
 Serves the 3D/AR knowledge graph visualization and REST API.
 100% local. No telemetry. No cloud. Your data never leaves your machine.
 """
@@ -13,16 +13,32 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 ROOT = Path(__file__).resolve().parent
-NOTES_DIR = ROOT / "notes"
+PROJECTS_ROOT = ROOT.parent  # D:/Projects
 VIZ_DIR = ROOT / "viz"
 GRAPH_FILE = VIZ_DIR / "graph-data.json"
 
 sys.path.insert(0, str(ROOT))
-from graph.engine import build_graph, export_graph_json, search_notes, parse_note
+from graph.project_indexer import build_full_graph
+from graph.engine import search_notes
+
+
+def load_graph():
+    """Load pre-built graph, or regenerate if missing."""
+    if GRAPH_FILE.exists():
+        try:
+            with open(GRAPH_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Regenerate
+    graph = build_full_graph(str(PROJECTS_ROOT), str(ROOT / "notes"))
+    GRAPH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    GRAPH_FILE.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding='utf-8')
+    return graph
 
 
 class BrainHandler(SimpleHTTPRequestHandler):
-    """Custom handler: serves static files + REST API endpoints."""
+    """Custom handler: static files + REST API."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -33,42 +49,67 @@ class BrainHandler(SimpleHTTPRequestHandler):
 
         # --- API Routes ---
         if path == "/api/graph":
-            self._json_response(export_graph_json(str(NOTES_DIR)))
+            graph = load_graph()
+            self._json_response(graph)
+            return
+
+        if path == "/api/refresh":
+            print("  [*] Regenerating knowledge graph from all projects...")
+            graph = build_full_graph(str(PROJECTS_ROOT), str(ROOT / "notes"))
+            GRAPH_FILE.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding='utf-8')
+            self._json_response({"ok": True, "stats": graph["stats"]})
             return
 
         if path == "/api/stats":
-            g = build_graph(str(NOTES_DIR))
-            self._json_response(g["stats"])
+            graph = load_graph()
+            self._json_response(graph.get("stats", {}))
             return
 
         if path == "/api/search":
             q = parse_qs(parsed.query).get("q", [""])[0]
-            results = search_notes(str(NOTES_DIR), q)
-            self._json_response(results)
-            return
-
-        if path.startswith("/api/note/"):
-            note_path_rel = path[len("/api/note/"):]
-            note_path = NOTES_DIR / note_path_rel
-            if note_path.exists():
-                note = parse_note(str(note_path))
-                if note:
-                    self._json_response(note)
-                    return
-            self._json_response({"error": "not found"}, 404)
+            graph = load_graph()
+            # Search through node labels, tags, and summaries
+            results = []
+            ql = q.lower()
+            for node in graph.get("nodes", []):
+                score = 0
+                if ql in node.get("label", "").lower():
+                    score += 10
+                if ql in node.get("summary", "").lower():
+                    score += 3
+                for tag in node.get("tags", []):
+                    if ql in tag.lower():
+                        score += 5
+                if score > 0:
+                    results.append({
+                        "id": node["id"],
+                        "title": node["label"],
+                        "path": node.get("path", ""),
+                        "project": node.get("project", ""),
+                        "type": node.get("type", ""),
+                        "score": score,
+                        "snippet": node.get("summary", "")[:200],
+                    })
+            results.sort(key=lambda r: r["score"], reverse=True)
+            self._json_response(results[:30])
             return
 
         if path == "/api/tags":
-            g = build_graph(str(NOTES_DIR))
+            graph = load_graph()
             tag_map = {}
-            for node in g["nodes"]:
-                for tag in node["tags"]:
+            for node in graph.get("nodes", []):
+                for tag in node.get("tags", []):
                     tag_map.setdefault(tag, []).append(node["id"])
             self._json_response(tag_map)
             return
 
+        if path == "/api/projects":
+            graph = load_graph()
+            projects = [n for n in graph.get("nodes", []) if n.get("type") == "project"]
+            self._json_response(projects)
+            return
+
         # --- Serve static files ---
-        # Redirect root to /viz/
         if path == "/" or path == "":
             self.send_response(302)
             self.send_header("Location", "/viz/")
@@ -87,35 +128,34 @@ class BrainHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format, *args):
-        # Quieter logging
         if "/api/" in str(args[0]):
-            print(f"  ⚡ {args[0]}")
+            print(f"  API: {args[0]}")
         else:
-            pass  # suppress static file noise
+            pass
 
 
 def main():
     port = 8420
 
-    # Ensure graph data is fresh
-    print("🧠 Building knowledge graph...")
-    export_graph_json(str(NOTES_DIR), str(GRAPH_FILE))
+    # Pre-load the graph
+    print("[*] Building knowledge graph from your real projects...")
+    graph = load_graph()
+    s = graph.get("stats", {})
+    print(f"    {s.get('total_projects', '?')} projects, {s.get('total_notes', '?')} nodes, {s.get('total_edges', '?')} edges")
 
-    # Start server
     server = HTTPServer(("127.0.0.1", port), BrainHandler)
-    print(f"\n{'═'*55}")
-    print(f"  🧠 SECOND BRAIN — LIVE")
-    print(f"  Local: http://localhost:{port}")
-    print(f"  AR Mode: Open on phone/AR headset browser")
+    print(f"\n{'='*55}")
+    print(f"  SECOND BRAIN -- LIVE")
+    print(f"  http://localhost:{port}")
     print(f"  Press Ctrl+C to stop")
-    print(f"{'═'*55}\n")
+    print(f"{'='*55}\n")
 
     webbrowser.open(f"http://localhost:{port}")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n👋 Shutting down. Your knowledge is safe.")
+        print("\nShutting down. Your knowledge is safe.")
         server.server_close()
 
 

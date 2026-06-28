@@ -1,8 +1,16 @@
 # Second Brain Configuration
-# All paths are relative to this config file's location
+# Indexes ALL your projects for a complete knowledge graph.
 
+# Where your projects live
+projects_root: ../  # D:/Projects (parent of second-brain/)
+
+# Your personal notes (optional, separate from project files)
 notes_dir: ./notes
+
+# Generated graph for visualization
 graph_output: ./viz/graph-data.json
+
+# Server
 server:
   host: 127.0.0.1
   port: 8420
@@ -11,16 +19,14 @@ server:
 git:
   auto_commit: true
   commit_interval_minutes: 30
-  remote: ""  # optional: push to private repo for backup
+  remote: ""
 
 # Visualization
 viz:
   theme: cyberpunk
   bloom_strength: 0.5
   auto_rotate: true
-  node_scale: 1.0
 
 # Security (everything local by default)
 security:
-  encrypt_notes: false  # set true for AES encryption at rest
-  encryption_key_file: ""  # path to key file if encrypting
+  encrypt_notes: false

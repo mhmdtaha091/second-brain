@@ -28,9 +28,11 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from graph.engine import build_graph, export_graph_json, search_notes, parse_note
+from graph.project_indexer import build_full_graph
+from graph.engine import parse_note, search_notes
 
 NOTES_DIR = Path(__file__).resolve().parent.parent / "notes"
+PROJECTS_ROOT = Path(__file__).resolve().parent.parent.parent  # D:/Projects
 GRAPH_OUT = Path(__file__).resolve().parent.parent / "viz" / "graph-data.json"
 
 NOW = datetime.now()
@@ -148,30 +150,54 @@ def cmd_link(args):
 
 
 def cmd_search(args):
-    """Full-text search. Usage: brain search "query" """
+    """Full-text search across ALL projects. Usage: brain search "query" """
     if not args:
         print("[!] Usage: brain search \"query\"")
         return
     query = args[0]
-    results = search_notes(str(NOTES_DIR), query)
+    ql = query.lower()
+    g = build_full_graph(str(PROJECTS_ROOT), str(NOTES_DIR))
+    results = []
+    for node in g.get("nodes", []):
+        score = 0
+        if ql in node.get("label", "").lower():
+            score += 10
+        if ql in node.get("summary", "").lower():
+            score += 3
+        for tag in node.get("tags", []):
+            if ql in tag.lower():
+                score += 5
+        if score > 0:
+            results.append({
+                "score": score,
+                "title": node.get("label", ""),
+                "path": node.get("path", node.get("type", "")),
+                "project": node.get("project", ""),
+                "type": node.get("type", ""),
+                "snippet": node.get("summary", "")[:200],
+            })
+    results.sort(key=lambda r: r["score"], reverse=True)
     if not results:
         print(f"[?] No results for: {query}")
         return
-    print(f"\nSearch results for \"{query}\":")
-    print("-" * 50)
-    for r in results:
-        print(f"  [{r['score']}] {r['title']}")
+    print(f"\nSearch results for \"{query}\" ({len(results)} hits):")
+    print("-" * 60)
+    for r in results[:25]:
+        tag = f"[{r['type']}]" if r.get('type') else ""
+        proj = f" @ {r['project']}" if r.get('project') else ""
+        print(f"  [{r['score']}] {tag} {r['title']}{proj}")
         print(f"       {r['path']}")
         print(f"       ...{r['snippet']}...\n")
 
 
 def cmd_graph(args=None):
-    """Regenerate the graph JSON for visualization."""
-    export_graph_json(str(NOTES_DIR), str(GRAPH_OUT))
-    g = build_graph(str(NOTES_DIR))
+    """Regenerate the graph JSON from all real projects."""
+    g = build_full_graph(str(PROJECTS_ROOT), str(NOTES_DIR))
+    GRAPH_OUT.parent.mkdir(parents=True, exist_ok=True)
+    GRAPH_OUT.write_text(json.dumps(g, indent=2, ensure_ascii=False), encoding='utf-8')
     s = g["stats"]
-    print(f"[*] Graph regenerated!")
-    print(f"    Notes: {s['total_notes']} | Edges: {s['total_edges']} | Tags: {s['total_tags']}")
+    print(f"[*] Graph regenerated from all projects!")
+    print(f"    Projects: {s.get('total_projects', '?')} | Nodes: {s['total_notes']} | Edges: {s['total_edges']}")
     print(f"    Orphans: {s['orphan_count']} | Communities: {len(g['communities'])}")
     print(f"    -> {GRAPH_OUT}")
 
@@ -188,23 +214,27 @@ def cmd_serve(args=None):
 
 def cmd_stats(args=None):
     """Show knowledge graph statistics."""
-    g = build_graph(str(NOTES_DIR))
+    g = build_full_graph(str(PROJECTS_ROOT), str(NOTES_DIR))
     s = g["stats"]
-    print(f"\n[*] Second Brain Stats")
+    print(f"\n[*] Second Brain Stats (from ALL projects)")
     print("=" * 50)
-    print(f"  Total Notes:     {s['total_notes']}")
+    print(f"  Projects:        {s.get('total_projects', '?')}")
+    print(f"  Total Nodes:     {s['total_notes']}")
     print(f"  Total Edges:     {s['total_edges']}")
     print(f"  Unique Tags:     {s['total_tags']}")
-    print(f"  Orphan Notes:    {s['orphan_count']}")
+    print(f"  Orphan Nodes:    {s['orphan_count']}")
     print(f"  Communities:     {len(g['communities'])}")
     print(f"  Generated:       {s['generated']}")
     if g["hubs"]:
         print(f"\n  *** Top Hubs:")
-        for h in g["hubs"][:5]:
-            print(f"     [{h['degree']}] {h['label']}")
-    if g["orphans"]:
-        orphan_labels = [n["label"] for n in g["nodes"] if n["id"] in g["orphans"]]
-        print(f"\n  --- Orphans (unlinked): {', '.join(orphan_labels[:10])}")
+        for h in g["hubs"][:8]:
+            print(f"     [{h['degree']}] {h['label']} ({h.get('type', '?')})")
+    # Show projects
+    projects = [n for n in g["nodes"] if n.get("type") == "project"]
+    if projects:
+        print(f"\n  *** Projects Indexed:")
+        for p in sorted(projects, key=lambda x: x.get('degree', 0), reverse=True):
+            print(f"     [{p.get('degree', 0)}] {p['label']}")
 
 
 def cmd_daily(args=None):
@@ -240,31 +270,29 @@ tags: [daily]
 
 def cmd_tags(args=None):
     """List all tags in the knowledge base."""
-    g = build_graph(str(NOTES_DIR))
+    g = build_full_graph(str(PROJECTS_ROOT), str(NOTES_DIR))
     tag_counts: dict[str, int] = {}
     for node in g["nodes"]:
-        for tag in node["tags"]:
+        for tag in node.get("tags", []):
             tag_counts[tag] = tag_counts.get(tag, 0) + 1
     print(f"\nTags ({len(tag_counts)}):")
     print("-" * 40)
-    for tag, count in sorted(tag_counts.items(), key=lambda x: x[1], reverse=True):
+    for tag, count in sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:30]:
         bar = "#" * min(count, 20)
-        print(f"  {tag:<20} {bar} {count}")
+        print(f"  {tag:<25} {bar} {count}")
 
 
 def cmd_orphans(args=None):
-    """List orphan notes (no links)."""
-    g = build_graph(str(NOTES_DIR))
+    """List orphan nodes (no links)."""
+    g = build_full_graph(str(PROJECTS_ROOT), str(NOTES_DIR))
     orphans = [n for n in g["nodes"] if n["id"] in g["orphans"]]
     if not orphans:
-        print("[*] No orphan notes! Every note is connected.")
+        print("[*] No orphan nodes! Everything is connected.")
         return
-    print(f"\nOrphan Notes ({len(orphans)}):")
+    print(f"\nOrphan Nodes ({len(orphans)}):")
     print("-" * 40)
-    for n in sorted(orphans, key=lambda x: x["label"]):
-        print(f"  [ ] {n['label']} ({n['path']})")
-    if orphans:
-        print(f"\nTip: Link them with 'brain link \"{orphans[0]['label']}\" \"Other Note\"'")
+    for n in sorted(orphans, key=lambda x: x.get("label", "")):
+        print(f"  [ ] {n.get('label','?')} ({n.get('path', n.get('type','?'))})")
 
 
 def cmd_delete(args):
