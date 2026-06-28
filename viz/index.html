@@ -1251,16 +1251,16 @@ function fingerCurlAngle(landmarks, joints) {
   return (a1 + a2) / 2;
 }
 
-// Check if a finger is "extended" (straight, not curled)
+// Check if a finger is "extended" (straight — bones aligned = small angle)
 function isFingerExtended(landmarks, fingerKey) {
   const angle = fingerCurlAngle(landmarks, FINGERS[fingerKey]);
-  return angle > 2.2; // > ~126° means mostly straight
+  return angle < 0.8; // bones nearly parallel = straight finger
 }
 
-// Check if a finger is "curled" (bent)
+// Check if a finger is "curled" (bent — bones angled)
 function isFingerCurled(landmarks, fingerKey) {
   const angle = fingerCurlAngle(landmarks, FINGERS[fingerKey]);
-  return angle < 1.6; // < ~92° means clearly bent
+  return angle > 1.2; // bones clearly not parallel = curled
 }
 
 // Thumb-to-index pinch distance (using tip landmarks)
@@ -1373,15 +1373,9 @@ function processGestures(landmarks) {
     controls.autoRotate = false;
     const dx = h[9].x - gs.prevWristX;
     const dy = h[9].y - gs.prevWristY;
-    if (Math.abs(dx) > 0.002 || Math.abs(dy) > 0.002) {
-      const panSpeed = camera.position.length() * 0.012;
-      const right = new THREE.Vector3().crossVectors(
-        camera.getWorldDirection(new THREE.Vector3()), camera.up
-      ).normalize();
-      controls.target.addScaledVector(right, -dx * panSpeed);
-      controls.target.addScaledVector(camera.up, dy * panSpeed);
-    }
-    label = 'FIST — pan';
+    if (Math.abs(dx) > 0.003) controls.rotateLeft(-dx * 6);
+    if (Math.abs(dy) > 0.003) controls.rotateUp(-dy * 5);
+    label = 'FIST — rotate';
 
   } else if (gs.currentGesture === 'point') {
     // Point = click/select nearest node
