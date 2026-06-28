@@ -186,7 +186,7 @@
     bottom: 30px;
     left: 50%;
     transform: translateX(-50%);
-    background: var(--surface);
+    background: rgba(10,10,20,0.85);
     border: 1px solid var(--accent);
     border-radius: 20px;
     padding: 8px 20px;
@@ -195,8 +195,40 @@
     font-family: var(--mono);
     display: none;
     animation: pulse 1.5s infinite;
+    backdrop-filter: blur(10px);
+    z-index: 30;
   }
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+
+  /* --- AR vignette overlay --- */
+  #ar-vignette {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 5;
+    display: none;
+    box-shadow: inset 0 0 150px 60px rgba(0,0,0,0.55);
+    border: 2px solid rgba(0,240,255,0.15);
+    border-radius: 4px;
+  }
+  #ar-vignette.active { display: block; }
+
+  /* --- AR scanlines --- */
+  #ar-scanlines {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 6;
+    display: none;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+  }
+  #ar-scanlines.active { display: block; }
 
   /* --- Legend --- */
   #legend {
@@ -216,21 +248,6 @@
   #legend .dot.hub { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
   #legend .dot.normal { background: var(--accent2); }
   #legend .dot.orphan { background: var(--accent3); }
-
-  /* --- Webcam preview (for hand tracking) --- */
-  #webcam-preview {
-    position: absolute;
-    bottom: 30px;
-    right: 16px;
-    width: 160px;
-    height: 120px;
-    border-radius: 12px;
-    border: 1px solid var(--border);
-    overflow: hidden;
-    display: none;
-    z-index: 20;
-  }
-  #webcam-preview video { width:100%; height:100%; object-fit:cover; }
 
   /* --- Responsive --- */
   @media (max-width: 768px) {
@@ -252,8 +269,7 @@
     <input id="search-input" type="text" placeholder="Search knowledge graph…" autocomplete="off">
     <span id="stats-pill"></span>
     <button class="hud-btn" id="btn-fit" title="Fit all nodes in view">⊞ Fit</button>
-    <button class="hud-btn" id="btn-ar" title="Enter AR mode (WebXR)">🔮 AR</button>
-    <button class="hud-btn" id="btn-hands" title="Toggle hand tracking">✋ Hands</button>
+    <button class="hud-btn" id="btn-ar" title="Webcam AR: see your graph in your real space">📷 AR</button>
     <button class="hud-btn" id="btn-tags" title="Color by tag community">🏷️ Tags</button>
   </div>
 
@@ -266,20 +282,20 @@
   <!-- Gesture Indicator -->
   <div id="gesture-indicator">✋ Gesture detected</div>
 
+  <!-- AR Overlays -->
+  <div id="ar-vignette"></div>
+  <div id="ar-scanlines"></div>
+
   <!-- Legend -->
   <div id="legend">
     <div><span class="dot project"></span> Project</div>
     <div><span class="dot hub"></span> Hub (connected)</div>
     <div><span class="dot normal"></span> File / Note</div>
     <div><span class="dot orphan"></span> Orphan (unlinked)</div>
-    <div style="margin-top:6px;color:var(--muted)">Drag to rotate | Scroll to zoom</div>
-    <div style="color:var(--muted)">Click node for details</div>
+    <div style="margin-top:6px;color:var(--muted)">Drag: rotate | Scroll: zoom | Click: details</div>
+    <div style="color:var(--muted)">📷 AR: graph over your webcam | ✋ auto hand tracking</div>
   </div>
 
-  <!-- Webcam Preview -->
-  <div id="webcam-preview">
-    <video id="webcam-video" autoplay playsinline></video>
-  </div>
 </div>
 
 <!-- Three.js -->
@@ -308,9 +324,13 @@ let nodeMeshes = [];
 let edgeLines = [];
 let labelObjects = [];
 let selectedNode = null;
+let webcamARActive = false;
 let handTrackingActive = false;
-let arSession = null;
 let tagColorMode = false;
+let webcamVideo = null;
+let backgroundPlane = null;
+let handLandmarker = null;
+let lastGesture = null;
 
 // ──────────────────────────────────────
 // Three.js Setup
@@ -799,64 +819,115 @@ function searchNodes(query) {
 }
 
 // ──────────────────────────────────────
-// AR Mode (WebXR)
+// Webcam AR Mode
+// Uses your webcam as the background — graph floats in your real space.
+// Hand tracking activates automatically with AR.
 // ──────────────────────────────────────
-document.getElementById('btn-ar').addEventListener('click', async () => {
-  if (arSession) {
-    arSession.end();
-    return;
-  }
 
-  if (!navigator.xr) {
-    alert('WebXR not supported in this browser. Try Chrome on Android or an AR headset.');
+// Hidden video element for the AR background
+const arVideo = document.createElement('video');
+arVideo.setAttribute('playsinline', '');
+arVideo.setAttribute('autoplay', '');
+arVideo.style.display = 'none';
+document.body.appendChild(arVideo);
+
+// Background video texture (created when AR starts)
+let videoTexture = null;
+let videoMaterial = null;
+
+async function toggleWebcamAR() {
+  if (webcamARActive) {
+    stopWebcamAR();
     return;
   }
 
   try {
-    const supported = await navigator.xr.isSessionSupported('immersive-ar');
-    if (!supported) {
-      alert('AR session not supported. Try a mobile device or AR headset with WebXR support.');
-      return;
+    // Request camera
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: 'user' }
+    });
+
+    arVideo.srcObject = stream;
+    await arVideo.play();
+
+    // Create video texture for scene background
+    videoTexture = new THREE.VideoTexture(arVideo);
+    videoTexture.colorSpace = THREE.SRGBColorSpace;
+
+    // Replace scene background with video
+    scene.background = videoTexture;
+
+    // Make fog lighter so the video shows through
+    scene.fog = new THREE.FogExp2('#000000', 0.00005);
+
+    // Dim the starfield - video is our background now
+    stars.material.opacity = 0.3;
+
+    // Enable transparency on renderer for blending effect
+    document.getElementById('canvas-container').style.background = 'transparent';
+
+    webcamARActive = true;
+    document.getElementById('btn-ar').classList.add('active');
+    document.getElementById('btn-ar').textContent = '📷 AR ON';
+    document.getElementById('gesture-indicator').style.display = 'block';
+    document.getElementById('ar-vignette').classList.add('active');
+    document.getElementById('ar-scanlines').classList.add('active');
+
+    // Auto-start hand tracking
+    if (!handTrackingActive) {
+      await initHandTracking();
     }
 
-    const session = await navigator.xr.requestSession('immersive-ar', {
-      requiredFeatures: ['local-floor', 'hand-tracking'],
-      optionalFeatures: ['dom-overlay'],
-    });
+    console.log('Webcam AR activated — graph is now in your space');
 
-    arSession = session;
-    document.getElementById('btn-ar').classList.add('active');
-    document.getElementById('btn-ar').textContent = '🔮 Exit AR';
-
-    renderer.xr.setSession(session);
-    renderer.xr.enabled = true;
-
-    session.addEventListener('end', () => {
-      arSession = null;
-      renderer.xr.enabled = false;
-      document.getElementById('btn-ar').classList.remove('active');
-      document.getElementById('btn-ar').textContent = '🔮 AR';
-    });
-
-    // Position graph in front of user in AR
-    camera.position.set(0, 1.5, -3);
-    controls.target.set(0, 0, -3);
   } catch (err) {
-    console.error('AR error:', err);
-    alert('Failed to start AR: ' + err.message);
+    console.error('Webcam error:', err);
+    alert('Could not access webcam. Please allow camera permissions.\n\nError: ' + err.message);
   }
-});
+}
+
+function stopWebcamAR() {
+  // Stop camera
+  if (arVideo.srcObject) {
+    arVideo.srcObject.getTracks().forEach(t => t.stop());
+    arVideo.srcObject = null;
+  }
+
+  // Restore dark background
+  scene.background = new THREE.Color('#0a0a0f');
+  scene.fog = new THREE.FogExp2('#0a0a0f', 0.00015);
+  stars.material.opacity = 1.0;
+
+  if (videoTexture) {
+    videoTexture.dispose();
+    videoTexture = null;
+  }
+
+  webcamARActive = false;
+  document.getElementById('btn-ar').classList.remove('active');
+  document.getElementById('btn-ar').textContent = '📷 AR';
+  document.getElementById('gesture-indicator').style.display = 'none';
+  document.getElementById('ar-vignette').classList.remove('active');
+  document.getElementById('ar-scanlines').classList.remove('active');
+
+  console.log('Webcam AR deactivated');
+}
 
 // ──────────────────────────────────────
-// Hand Tracking (MediaPipe — via webcam)
+// Hand Tracking (MediaPipe)
+// Works with or without AR mode
 // ──────────────────────────────────────
-let handLandmarker = null;
-let handVision = null;
-let lastGesture = null;
-let gestureStableCount = 0;
 
 async function initHandTracking() {
-  if (!handVision) {
+  if (handLandmarker) {
+    // Already loaded, just start tracking
+    handTrackingActive = true;
+    document.getElementById('gesture-indicator').style.display = 'block';
+    requestAnimationFrame(detectHands);
+    return;
+  }
+
+  try {
     // Dynamically load MediaPipe
     const { FilesetResolver, HandLandmarker } = await import(
       'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/+esm'
@@ -874,33 +945,14 @@ async function initHandTracking() {
       runningMode: 'VIDEO',
       numHands: 2,
     });
-    handVision = vision;
-  }
 
-  // Start webcam
-  const video = document.getElementById('webcam-video');
-  const preview = document.getElementById('webcam-preview');
-
-  if (!handTrackingActive) {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-      video.srcObject = stream;
-      preview.style.display = 'block';
-      handTrackingActive = true;
-      document.getElementById('btn-hands').classList.add('active');
-      document.getElementById('gesture-indicator').style.display = 'block';
-      requestAnimationFrame(detectHands);
-    } catch (err) {
-      console.error('Camera error:', err);
-      alert('Could not access webcam for hand tracking: ' + err.message);
-    }
-  } else {
-    // Stop
-    const stream = document.getElementById('webcam-video').srcObject;
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    document.getElementById('webcam-preview').style.display = 'none';
+    handTrackingActive = true;
+    document.getElementById('gesture-indicator').style.display = 'block';
+    requestAnimationFrame(detectHands);
+    console.log('Hand tracking ready — use gestures to control the graph');
+  } catch (err) {
+    console.error('MediaPipe load error:', err);
     handTrackingActive = false;
-    document.getElementById('btn-hands').classList.remove('active');
     document.getElementById('gesture-indicator').style.display = 'none';
   }
 }
@@ -908,8 +960,9 @@ async function initHandTracking() {
 function detectHands() {
   if (!handTrackingActive || !handLandmarker) return;
 
-  const video = document.getElementById('webcam-video');
-  if (video.readyState < 2) {
+  // Use the AR video if active, otherwise try to get webcam
+  const video = webcamARActive ? arVideo : document.getElementById('webcam-video');
+  if (!video || video.readyState < 2) {
     requestAnimationFrame(detectHands);
     return;
   }
@@ -924,10 +977,9 @@ function detectHands() {
 }
 
 function processGestures(landmarks) {
-  // landmarks[0] = first hand, 21 landmarks each
   const hand = landmarks[0];
 
-  // Thumb tip (4) vs index tip (8) distance → pinch detection
+  // Thumb tip (4) vs index tip (8) — pinch detection
   const thumbTip = hand[4];
   const indexTip = hand[8];
   const pinchDist = Math.sqrt(
@@ -936,7 +988,7 @@ function processGestures(landmarks) {
     (thumbTip.z - indexTip.z) ** 2
   );
 
-  // Middle finger tip (12) vs wrist (0) → grab detection
+  // Middle finger tip (12) vs wrist (0) — grab detection
   const middleTip = hand[12];
   const wrist = hand[0];
   const grabDist = Math.sqrt(
@@ -945,36 +997,42 @@ function processGestures(landmarks) {
     (middleTip.z - wrist.z) ** 2
   );
 
+  // Index up, middle down = pointing (for selection)
+  const indexUp = hand[8].y < hand[6].y;
+  const middleDown = hand[12].y > hand[10].y;
+  const isPointing = indexUp && middleDown;
+
   let gesture = 'none';
-  if (pinchDist < 0.05) gesture = 'pinch';      // Select
-  else if (grabDist < 0.15) gesture = 'grab';    // Rotate/zoom
-  else if (hand[8].y < hand[6].y && hand[12].y < hand[10].y) gesture = 'peace'; // Navigate
+  if (pinchDist < 0.05) gesture = 'PINCH (select)';
+  else if (grabDist < 0.15) gesture = 'GRAB (rotate)';
+  else if (isPointing) gesture = 'POINT (navigate)';
 
   document.getElementById('gesture-indicator').textContent =
-    `✋ ${gesture.toUpperCase()}`;
+    '✋ ' + (gesture === 'none' ? 'Hand detected' : gesture);
 
   // Apply gesture controls
-  if (gesture === 'grab') {
-    // Rotate graph
-    const dx = (hand[9].x - 0.5) * 0.05;
-    const dy = (hand[9].y - 0.5) * 0.05;
+  if (gesture === 'GRAB (rotate)') {
+    const dx = (hand[9].x - 0.5) * 0.08;
+    const dy = (hand[9].y - 0.5) * 0.06;
     controls.autoRotate = false;
-    scene.rotation.y += dx;
-    scene.rotation.x += dy * 0.5;
-  } else if (gesture === 'pinch') {
+    controls.rotateLeft(-dx * 3);
+    controls.rotateUp(-dy * 2);
+  } else if (gesture === 'PINCH (select)') {
     // Zoom in
-    camera.position.multiplyScalar(0.995);
-  } else if (gesture === 'peace') {
+    camera.position.multiplyScalar(0.993);
+  } else if (gesture === 'POINT (navigate)') {
     // Zoom out
-    camera.position.multiplyScalar(1.005);
+    camera.position.multiplyScalar(1.007);
   } else {
-    controls.autoRotate = true;
+    if (!controls.autoRotate && webcamARActive) {
+      // Slowly resume auto-rotate when no gesture
+    }
   }
 
   lastGesture = gesture;
 }
 
-document.getElementById('btn-hands').addEventListener('click', initHandTracking);
+document.getElementById('btn-ar').addEventListener('click', toggleWebcamAR);
 
 // ──────────────────────────────────────
 // UI Buttons
@@ -1053,9 +1111,9 @@ animate();
 
 console.log('%c🧠 Second Brain Ready %c— %cYour knowledge, visualized.',
   'font-size:18px;', '', 'color:#b44dff;');
-console.log('%c  F: Fit view | S: Search | T: Tag mode | R: Auto-rotate | ESC: Close panel',
+console.log('%c  F: Fit | S: Search | T: Tags | R: Auto-rotate | ESC: Close',
   'color:#6b6b8a;');
-console.log('%c  ✋ Click "Hands" for gesture control | 🔮 "AR" for WebXR mode',
+console.log('%c  📷 Click AR: webcam background + hand gestures in your real space',
   'color:#6b6b8a;');
 </script>
 </body>

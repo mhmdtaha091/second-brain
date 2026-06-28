@@ -406,7 +406,7 @@ def build_full_graph(projects_root: str, notes_dir: str | None = None) -> dict:
         "communities": communities,
         "tag_clusters": tag_clusters,
         "orphans": orphans,
-        "hubs": [{"id": h["id"], "label": h["label"], "degree": h["degree"]} for h in hubs],
+        "hubs": [{"id": h["id"], "label": h["label"], "type": h.get("type", ""), "degree": h["degree"]} for h in hubs],
         "stats": {
             "total_notes": len(all_nodes),
             "total_edges": len(unique_edges),
