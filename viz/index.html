@@ -578,7 +578,16 @@ let webcamARActive = false;
 let handTrackingActive = false;
 let tagColorMode = false;
 let handLandmarker = null;
-let lastGesture = null;
+
+// Gesture state machine
+let gestureState = {
+  wasPinching: false,      // was pinching last frame?
+  pinchStartSize: 0,       // hand size when pinch began
+  pinchStartZ: 0,          // camera distance when pinch began
+  prevHandAngle: 0,        // for twist detection
+  prevWristX: 0,
+  prevWristY: 0,
+};
 
 // ── Three.js Setup ────────────────────────────
 const container = document.getElementById('canvas-container');
@@ -1165,21 +1174,86 @@ function drawHandSkeleton(landmarks) {
   }
 }
 
+function handSize(landmarks) {
+  // Distance from wrist (0) to middle finger tip (12) = proxy for hand distance from camera
+  const h = landmarks[0];
+  return Math.sqrt((h[0].x-h[12].x)**2 + (h[0].y-h[12].y)**2 + (h[0].z-h[12].z)**2);
+}
+
+function handAngle(landmarks) {
+  // Angle of the hand in the XY plane (for twist/rotation)
+  const h = landmarks[0];
+  return Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x);
+}
+
+function isPinching(landmarks) {
+  const h = landmarks[0];
+  const dist = Math.sqrt((h[4].x-h[8].x)**2 + (h[4].y-h[8].y)**2 + (h[4].z-h[8].z)**2);
+  return dist < 0.06;
+}
+
+function isFist(landmarks) {
+  // All fingertips close to wrist = fist
+  const h = landmarks[0];
+  let totalDist = 0;
+  for (const tip of [4, 8, 12, 16, 20]) {
+    totalDist += Math.sqrt((h[tip].x-h[0].x)**2 + (h[tip].y-h[0].y)**2);
+  }
+  return totalDist < 1.2; // fist: fingers curled in
+}
+
 function processGestures(landmarks) {
   const h = landmarks[0];
-  const pinch = Math.sqrt((h[4].x-h[8].x)**2+(h[4].y-h[8].y)**2+(h[4].z-h[8].z)**2);
-  const grab = Math.sqrt((h[12].x-h[0].x)**2+(h[12].y-h[0].y)**2+(h[12].z-h[0].z)**2);
-  const pointing = h[8].y < h[6].y && h[12].y > h[10].y;
-  let g = 'Hand seen — move to control';
-  if (pinch < 0.06) g = 'PINCH — zoom in';
-  else if (grab < 0.18) g = 'GRAB — rotate';
-  else if (pointing) g = 'POINT — zoom out';
-  document.getElementById('gesture-indicator').textContent = g;
-  if (g.includes('GRAB')) { controls.autoRotate = false; controls.rotateLeft(-(h[9].x-0.5)*0.2); controls.rotateUp(-(h[9].y-0.5)*0.15); }
-  else if (g.includes('PINCH')) camera.position.multiplyScalar(0.994);
-  else if (g.includes('POINT')) camera.position.multiplyScalar(1.006);
+  const pinching = isPinching(landmarks);
+  const fist = isFist(landmarks);
+  const size = handSize(landmarks);
+  const angle = handAngle(landmarks);
+  const gs = gestureState;
 
-  // Draw hand skeleton overlay
+  let label = 'Open hand — idle';
+  controls.autoRotate = true;
+
+  if (pinching) {
+    // ── PINCH MODE: hold pinch + move hand to zoom ──
+    if (!gs.wasPinching) {
+      // Pinch just started — capture reference
+      gs.pinchStartSize = size;
+      gs.pinchStartZ = h[0].z;
+    }
+
+    const sizeDelta = size - gs.pinchStartSize;
+    // Hand closer to camera = larger hand size = zoom IN
+    // Hand farther from camera = smaller hand size = zoom OUT
+    const zoomFactor = 1 + sizeDelta * 1.5;
+    camera.position.multiplyScalar(1 / Math.max(0.3, Math.min(3, zoomFactor)));
+
+    // Twist detection while pinching for rotation
+    const angleDelta = angle - gs.prevHandAngle;
+    if (Math.abs(angleDelta) > 0.02 && Math.abs(angleDelta) < 0.5) {
+      controls.autoRotate = false;
+      controls.rotateLeft(angleDelta * 2);
+    }
+
+    label = `PINCH — pull/push to zoom · twist to rotate`;
+  } else if (fist) {
+    // ── FIST MODE: grab and drag to rotate ──
+    controls.autoRotate = false;
+    const dx = h[9].x - gs.prevWristX;
+    const dy = h[9].y - gs.prevWristY;
+    if (Math.abs(dx) > 0.005) controls.rotateLeft(-dx * 8);
+    if (Math.abs(dy) > 0.005) controls.rotateUp(-dy * 6);
+    label = 'FIST — drag to rotate';
+  }
+
+  // Track state for next frame
+  gs.wasPinching = pinching;
+  gs.prevHandAngle = angle;
+  gs.prevWristX = h[9].x;
+  gs.prevWristY = h[9].y;
+
+  document.getElementById('gesture-indicator').textContent = label;
+
+  // Draw hand skeleton
   handCanvas.style.display = 'block';
   drawHandSkeleton(landmarks);
 }
