@@ -1074,9 +1074,30 @@ function detectHands() {
 
   try {
     const results = handLandmarker.detectForVideo(video, performance.now());
-    if (results.landmarks?.length > 0) {
+    if (results.landmarks?.length > 0 && results.landmarks[0].length === 21) {
       const raw = results.landmarks[0];
-      // Exponential moving average smoothing (α=0.35) kills jitter
+
+      // Validity check: is the hand actually in frame?
+      // If wrist is at extreme edge or confidence is trash, reject
+      const wrist = raw[0];
+      const midTip = raw[12];
+      const handSpan = Math.sqrt((wrist.x-midTip.x)**2 + (wrist.y-midTip.y)**2);
+      const inFrame = wrist.x > 0.05 && wrist.x < 0.95 && wrist.y > 0.05 && wrist.y < 0.95;
+      const plausibleSize = handSpan > 0.08 && handSpan < 0.8;
+
+      if (!inFrame || !plausibleSize) {
+        // Hand partially out of frame or nonsensical — don't trust it
+        gestureState.smoothLandmarks = null;
+        gestureState.currentGesture = 'open';
+        gestureState.gestureFrames = 0;
+        document.getElementById('gesture-indicator').style.opacity = '0.3';
+        document.getElementById('gesture-indicator').textContent = 'No hand';
+        handCanvas.style.display = 'none';
+        handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+        return;
+      }
+
+      // EMA smoothing (α=0.35)
       if (!gestureState.smoothLandmarks) {
         gestureState.smoothLandmarks = raw.map(l => ({x:l.x, y:l.y, z:l.z}));
       } else {
@@ -1091,10 +1112,12 @@ function detectHands() {
       document.getElementById('gesture-indicator').style.opacity = '1';
       handCanvas.style.display = 'block';
     } else {
+      // No hand detected — full reset
       gestureState.smoothLandmarks = null;
       gestureState.currentGesture = 'open';
       gestureState.gestureFrames = 0;
-      document.getElementById('gesture-indicator').style.opacity = '0.4';
+      document.getElementById('gesture-indicator').style.opacity = '0.3';
+      document.getElementById('gesture-indicator').textContent = 'No hand';
       handCanvas.style.display = 'none';
       handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
     }
