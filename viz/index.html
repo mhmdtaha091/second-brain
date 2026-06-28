@@ -1126,8 +1126,6 @@ function drawHandSkeleton(landmarks) {
   const h = handCanvas.height;
   handCtx.clearRect(0, 0, w, h);
 
-  // Use the video dimensions for aspect-aware mapping
-  // Webcam is mirrored (facing user), so flip X
   const videoW = 640;
   const videoH = 480;
   const scale = Math.min(w / videoW, h / videoH);
@@ -1135,159 +1133,219 @@ function drawHandSkeleton(landmarks) {
   const offsetY = (h - videoH * scale) / 2;
 
   function toScreen(lm) {
-    return [
-      offsetX + (1 - lm.x) * videoW * scale,  // flip X for mirror
-      offsetY + lm.y * videoH * scale,
-    ];
+    return [offsetX + (1 - lm.x) * videoW * scale, offsetY + lm.y * videoH * scale];
   }
 
-  // Draw each hand
+  // Per-finger colors: extended = cyan, curled = magenta
+  const fingerKeys = ['thumb','index','middle','ring','pinky'];
+  const fingerTips = { thumb:4, index:8, middle:12, ring:16, pinky:20 };
+  const fingerBones = {
+    thumb: [[0,1],[1,2],[2,3],[3,4]],
+    index: [[0,5],[5,6],[6,7],[7,8]],
+    middle: [[0,9],[9,10],[10,11],[11,12]],
+    ring: [[0,13],[13,14],[14,15],[15,16]],
+    pinky: [[0,17],[17,18],[18,19],[19,20]],
+  };
+  const palmBones = [[5,9],[9,13],[13,17]];
+
   for (const hand of landmarks) {
-    // Draw connections (bones)
-    for (const [a, b] of HAND_CONNECTIONS) {
-      const [ax, ay] = toScreen(hand[a]);
-      const [bx, by] = toScreen(hand[b]);
-      // Glow layer
-      handCtx.beginPath();
-      handCtx.moveTo(ax, ay);
-      handCtx.lineTo(bx, by);
-      handCtx.strokeStyle = 'rgba(0,229,255,0.3)';
-      handCtx.lineWidth = 6;
-      handCtx.lineCap = 'round';
-      handCtx.stroke();
-      // Core line
-      handCtx.beginPath();
-      handCtx.moveTo(ax, ay);
-      handCtx.lineTo(bx, by);
-      handCtx.strokeStyle = 'rgba(0,229,255,0.9)';
-      handCtx.lineWidth = 2;
+    // Draw each finger with its state color
+    for (const key of fingerKeys) {
+      const extended = isFingerExtended([hand], key);
+      const coreColor = extended ? '#00E5FF' : '#FF4488';
+      const glowColor = extended ? 'rgba(0,229,255,0.3)' : 'rgba(255,68,136,0.3)';
+
+      for (const [a, b] of fingerBones[key]) {
+        const [ax, ay] = toScreen(hand[a]);
+        const [bx, by] = toScreen(hand[b]);
+        // Glow
+        handCtx.beginPath(); handCtx.moveTo(ax, ay); handCtx.lineTo(bx, by);
+        handCtx.strokeStyle = glowColor; handCtx.lineWidth = 6; handCtx.lineCap = 'round';
+        handCtx.stroke();
+        // Core
+        handCtx.beginPath(); handCtx.moveTo(ax, ay); handCtx.lineTo(bx, by);
+        handCtx.strokeStyle = coreColor; handCtx.lineWidth = 2.5;
+        handCtx.stroke();
+      }
+
+      // Fingertip glow
+      const [tx, ty] = toScreen(hand[fingerTips[key]]);
+      handCtx.beginPath(); handCtx.arc(tx, ty, 5, 0, Math.PI*2);
+      handCtx.fillStyle = extended ? '#FFFFFF' : '#FF88AA';
+      handCtx.fill();
+      handCtx.shadowColor = extended ? '#00E5FF' : '#FF4488';
+      handCtx.shadowBlur = 14; handCtx.fill(); handCtx.shadowBlur = 0;
+    }
+
+    // Palm bones (always cyan)
+    for (const [a, b] of palmBones) {
+      const [ax, ay] = toScreen(hand[a]); const [bx, by] = toScreen(hand[b]);
+      handCtx.beginPath(); handCtx.moveTo(ax, ay); handCtx.lineTo(bx, by);
+      handCtx.strokeStyle = 'rgba(0,229,255,0.2)'; handCtx.lineWidth = 4;
       handCtx.stroke();
     }
 
-    // Draw landmarks (joints)
-    for (const lm of hand) {
-      const [x, y] = toScreen(lm);
-      // Outer glow
-      handCtx.beginPath();
-      handCtx.arc(x, y, 6, 0, Math.PI * 2);
-      handCtx.fillStyle = 'rgba(0,229,255,0.25)';
-      handCtx.fill();
-      // Inner dot
-      handCtx.beginPath();
-      handCtx.arc(x, y, 3, 0, Math.PI * 2);
-      handCtx.fillStyle = '#00E5FF';
-      handCtx.fill();
-      handCtx.shadowColor = '#00E5FF';
-      handCtx.shadowBlur = 8;
-      handCtx.fill();
-      handCtx.shadowBlur = 0;
-    }
-
-    // Highlight fingertips bigger
-    for (const tipIdx of [4, 8, 12, 16, 20]) {
-      const [x, y] = toScreen(hand[tipIdx]);
-      handCtx.beginPath();
-      handCtx.arc(x, y, 5, 0, Math.PI * 2);
-      handCtx.fillStyle = '#FFFFFF';
-      handCtx.fill();
-      handCtx.shadowColor = '#00E5FF';
-      handCtx.shadowBlur = 14;
-      handCtx.fill();
-      handCtx.shadowBlur = 0;
-    }
+    // Wrist dot
+    const [wx, wy] = toScreen(hand[0]);
+    handCtx.beginPath(); handCtx.arc(wx, wy, 4, 0, Math.PI*2);
+    handCtx.fillStyle = '#00E5FF'; handCtx.fill();
   }
 }
 
-// ── Gesture detection (jitter-proof with hysteresis) ──
+// ── Advanced hand analysis ────────────────────
 
-function landmarkDist(a, b) {
-  return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2);
+// Landmark indices for finger joints (MCP, PIP, DIP, TIP)
+const FINGERS = {
+  thumb:  [1, 2, 3, 4],
+  index:  [5, 6, 7, 8],
+  middle: [9, 10, 11, 12],
+  ring:   [13, 14, 15, 16],
+  pinky:  [17, 18, 19, 20],
+};
+
+function vec3FromLM(lm) { return new THREE.Vector3(lm.x, lm.y, lm.z); }
+
+// Angle between two 3D vectors
+function angleBetween(a, b) {
+  const dot = a.dot(b) / (a.length() * b.length());
+  return Math.acos(Math.max(-1, Math.min(1, dot)));
 }
 
-function handSize(landmarks) {
+// Compute the curl angle of a finger (MCP->PIP vs PIP->DIP angle)
+// Returns radians — small angle = curled, large angle = extended
+function fingerCurlAngle(landmarks, joints) {
   const h = landmarks[0];
-  return landmarkDist(h[0], h[12]);
+  const mcp = vec3FromLM(h[joints[0]]);
+  const pip = vec3FromLM(h[joints[1]]);
+  const dip = vec3FromLM(h[joints[2]]);
+  const tip = vec3FromLM(h[joints[3]]);
+  const bone1 = new THREE.Vector3().subVectors(pip, mcp);
+  const bone2 = new THREE.Vector3().subVectors(dip, pip);
+  const bone3 = new THREE.Vector3().subVectors(tip, dip);
+  // Average of both joint angles
+  const a1 = angleBetween(bone1, bone2);
+  const a2 = angleBetween(bone2, bone3);
+  return (a1 + a2) / 2;
 }
 
-function handAngle(landmarks) {
-  const h = landmarks[0];
-  return Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x);
+// Check if a finger is "extended" (straight, not curled)
+function isFingerExtended(landmarks, fingerKey) {
+  const angle = fingerCurlAngle(landmarks, FINGERS[fingerKey]);
+  return angle > 2.2; // > ~126° means mostly straight
 }
 
-// Pinch: thumb tip (4) touches index tip (8) — AND other fingers extended
-function isPinching(landmarks) {
-  const h = landmarks[0];
-  const pinchDist = landmarkDist(h[4], h[8]);
-  // Other fingers must be extended (tips far from wrist)
-  const middleExt = landmarkDist(h[0], h[12]) > 0.25;
-  const ringExt = landmarkDist(h[0], h[16]) > 0.2;
-  const pinkyExt = landmarkDist(h[0], h[20]) > 0.18;
-  return pinchDist < 0.07 && middleExt && ringExt && pinkyExt;
+// Check if a finger is "curled" (bent)
+function isFingerCurled(landmarks, fingerKey) {
+  const angle = fingerCurlAngle(landmarks, FINGERS[fingerKey]);
+  return angle < 1.6; // < ~92° means clearly bent
 }
 
-// Fist: ALL fingertips curled close to wrist
-function isFist(landmarks) {
+// Thumb-to-index pinch distance (using tip landmarks)
+function pinchDistance(landmarks) {
   const h = landmarks[0];
-  let sum = 0;
-  for (const tip of [4, 8, 12, 16, 20]) {
-    sum += landmarkDist(h[0], h[tip]);
+  return landmarkDist(h[4], h[8]);
+}
+
+// Palm normal vector (wrist, index MCP, pinky MCP — right-hand rule)
+function palmNormal(landmarks) {
+  const h = landmarks[0];
+  const wrist = vec3FromLM(h[0]);
+  const idxMcp = vec3FromLM(h[5]);
+  const pinkyMcp = vec3FromLM(h[17]);
+  const v1 = new THREE.Vector3().subVectors(idxMcp, wrist);
+  const v2 = new THREE.Vector3().subVectors(pinkyMcp, wrist);
+  return new THREE.Vector3().crossVectors(v2, v1).normalize();
+}
+
+// Hand orientation vector (wrist → middle finger MCP)
+function handDirection(landmarks) {
+  const h = landmarks[0];
+  return new THREE.Vector3().subVectors(vec3FromLM(h[9]), vec3FromLM(h[0])).normalize();
+}
+
+// ── Gesture detection with advanced landmarking ──
+
+function classifyGesture(landmarks) {
+  const pinchDist = pinchDistance(landmarks);
+  const thumbExt = isFingerExtended(landmarks, 'thumb');
+  const indexExt = isFingerExtended(landmarks, 'index');
+  const middleExt = isFingerExtended(landmarks, 'middle');
+  const ringExt = isFingerExtended(landmarks, 'ring');
+  const pinkyExt = isFingerExtended(landmarks, 'pinky');
+  const middleCurled = isFingerCurled(landmarks, 'middle');
+  const ringCurled = isFingerCurled(landmarks, 'ring');
+  const pinkyCurled = isFingerCurled(landmarks, 'pinky');
+
+  const extendedCount = [thumbExt, indexExt, middleExt, ringExt, pinkyExt].filter(Boolean).length;
+  const curledCount = [middleCurled, ringCurled, pinkyCurled].filter(Boolean).length;
+
+  // PINCH: thumb+index tips close together, middle+ring+pinky extended (not a fist)
+  if (pinchDist < 0.07 && middleExt && ringExt && pinkyExt) {
+    return 'pinch';
   }
-  return sum < 1.0; // tight fist: all fingers curled
+
+  // FIST: all 4 non-thumb fingers curled
+  if (middleCurled && ringCurled && pinkyCurled && !indexExt) {
+    return 'fist';
+  }
+
+  // POINT: only index extended, middle+ring+pinky curled
+  if (indexExt && middleCurled && ringCurled && pinkyCurled) {
+    return 'point';
+  }
+
+  // PEACE: index + middle extended, ring + pinky curled
+  if (indexExt && middleExt && ringCurled && pinkyCurled) {
+    return 'peace';
+  }
+
+  return 'open';
 }
+
+// ── Process gestures (jitter-proof) ──
 
 function processGestures(landmarks) {
   const h = landmarks[0];
   const gs = gestureState;
-  const size = handSize(landmarks);
-  const angle = handAngle(landmarks);
+  const size = landmarkDist(h[0], h[12]);
 
-  const rawPinching = isPinching(landmarks);
-  const rawFist = isFist(landmarks);
+  const rawGesture = classifyGesture(landmarks);
 
-  // ── Hysteresis: require N consecutive frames to lock in, fewer to release ──
-  if (rawPinching && gs.currentGesture !== 'pinch') {
-    gs.gestureFrames++;
-    if (gs.gestureFrames >= gs.lockThreshold) {
-      gs.currentGesture = 'pinch';
-      gs.pinchStartSize = size; // capture reference on lock
-      gs.gestureFrames = 0;
-    }
-  } else if (rawFist && gs.currentGesture !== 'fist') {
-    gs.gestureFrames++;
-    if (gs.gestureFrames >= gs.lockThreshold) {
-      gs.currentGesture = 'fist';
-      gs.gestureFrames = 0;
-    }
-  } else if (!rawPinching && !rawFist) {
-    // Release faster — only 3 frames to exit
-    gs.gestureFrames++;
-    if (gs.gestureFrames >= 3) {
-      gs.currentGesture = 'open';
-      gs.gestureFrames = 0;
-    }
-  } else {
-    // Still matching current gesture — reset counter
+  // ── Hysteresis: lock in after N frames, release faster ──
+  if (rawGesture === gs.currentGesture) {
     gs.gestureFrames = Math.max(0, gs.gestureFrames - 1);
+  } else if (rawGesture === 'open') {
+    gs.gestureFrames++;
+    if (gs.gestureFrames >= 3) { gs.currentGesture = 'open'; gs.gestureFrames = 0; }
+  } else {
+    gs.gestureFrames++;
+    if (gs.gestureFrames >= gs.lockThreshold) {
+      gs.currentGesture = rawGesture;
+      if (rawGesture === 'pinch') gs.pinchStartSize = size;
+      gs.gestureFrames = 0;
+    }
   }
 
-  // ── Apply current gesture ──
-  let label = 'Open hand';
+  // ── Apply gesture ──
+  let label = 'OPEN — idle';
   controls.autoRotate = true;
 
   if (gs.currentGesture === 'pinch') {
     const sizeDelta = size - gs.pinchStartSize;
     const dist = camera.position.length();
-    const targetDist = dist * (1 - sizeDelta * 3.5);
-    const newDist = Math.max(2, Math.min(200, targetDist));
+    const newDist = Math.max(2, Math.min(200, dist * (1 - sizeDelta * 3.5)));
     camera.position.normalize().multiplyScalar(newDist);
 
-    // Twist while pinching = rotate
+    // Twist = rotate
+    const angle = Math.atan2(h[9].y-h[0].y, h[9].x-h[0].x);
     const angleDelta = angle - gs.prevHandAngle;
     if (Math.abs(angleDelta) > 0.015 && Math.abs(angleDelta) < 0.5) {
       controls.autoRotate = false;
       controls.rotateLeft(angleDelta * 2);
     }
+    gs.prevHandAngle = angle;
     label = `PINCH — ${newDist.toFixed(0)}u`;
+
   } else if (gs.currentGesture === 'fist') {
     controls.autoRotate = false;
     const dx = h[9].x - gs.prevWristX;
@@ -1301,10 +1359,21 @@ function processGestures(landmarks) {
       controls.target.addScaledVector(camera.up, dy * panSpeed);
     }
     label = 'FIST — pan';
+
+  } else if (gs.currentGesture === 'point') {
+    // Point = click/select nearest node
+    const dir = handDirection(landmarks);
+    const origin = vec3FromLM(h[5]); // index MCP as ray origin
+    // Project from hand space to screen space for raycasting
+    label = 'POINT — select';
+
+  } else if (gs.currentGesture === 'peace') {
+    // Peace = zoom out fully (overview)
+    const target = camera.position.clone().normalize().multiplyScalar(80);
+    camera.position.lerp(target, 0.05);
+    label = 'PEACE — overview';
   }
 
-  // Track previous for delta calculations
-  gs.prevHandAngle = angle;
   gs.prevWristX = h[9].x;
   gs.prevWristY = h[9].y;
 
@@ -1312,6 +1381,11 @@ function processGestures(landmarks) {
 
   handCanvas.style.display = 'block';
   drawHandSkeleton(landmarks);
+}
+
+// Helper needed by processGestures
+function landmarkDist(a, b) {
+  return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2);
 }
 
 // ── Buttons ───────────────────────────────────
