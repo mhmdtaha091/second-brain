@@ -587,7 +587,12 @@ let gestureState = {
   prevHandAngle: 0,
   prevWristX: 0,
   prevWristY: 0,
-  frameSkip: 0,            // throttle MediaPipe to every 3rd frame
+  frameSkip: 0,
+  // Smoothing & hysteresis
+  smoothLandmarks: null,    // EMA-smoothed landmarks
+  currentGesture: 'open',   // 'open' | 'pinch' | 'fist'
+  gestureFrames: 0,         // how long current gesture has been held
+  lockThreshold: 5,         // frames before locking in a gesture
 };
 
 // ── Three.js Setup ────────────────────────────
@@ -1061,7 +1066,6 @@ async function initHandTracking() {
 function detectHands() {
   if (!handTrackingActive || !handLandmarker) return;
 
-  // Throttle: only run MediaPipe every 3rd frame
   gestureState.frameSkip = (gestureState.frameSkip || 0) + 1;
   if (gestureState.frameSkip % 3 !== 0) return;
 
@@ -1071,17 +1075,30 @@ function detectHands() {
   try {
     const results = handLandmarker.detectForVideo(video, performance.now());
     if (results.landmarks?.length > 0) {
-      processGestures(results.landmarks);
+      const raw = results.landmarks[0];
+      // Exponential moving average smoothing (α=0.35) kills jitter
+      if (!gestureState.smoothLandmarks) {
+        gestureState.smoothLandmarks = raw.map(l => ({x:l.x, y:l.y, z:l.z}));
+      } else {
+        const α = 0.35;
+        raw.forEach((l, i) => {
+          gestureState.smoothLandmarks[i].x += α * (l.x - gestureState.smoothLandmarks[i].x);
+          gestureState.smoothLandmarks[i].y += α * (l.y - gestureState.smoothLandmarks[i].y);
+          gestureState.smoothLandmarks[i].z += α * (l.z - gestureState.smoothLandmarks[i].z);
+        });
+      }
+      processGestures([gestureState.smoothLandmarks]);
       document.getElementById('gesture-indicator').style.opacity = '1';
       handCanvas.style.display = 'block';
     } else {
+      gestureState.smoothLandmarks = null;
+      gestureState.currentGesture = 'open';
+      gestureState.gestureFrames = 0;
       document.getElementById('gesture-indicator').style.opacity = '0.4';
       handCanvas.style.display = 'none';
       handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
     }
-  } catch(e) {
-    // MediaPipe can throw if called too fast — ignore
-  }
+  } catch(e) { /* ignore */ }
 }
 
 // Hand skeleton connections (MediaPipe hand topology)
@@ -1181,102 +1198,118 @@ function drawHandSkeleton(landmarks) {
   }
 }
 
+// ── Gesture detection (jitter-proof with hysteresis) ──
+
+function landmarkDist(a, b) {
+  return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2);
+}
+
 function handSize(landmarks) {
-  // Distance from wrist (0) to middle finger tip (12) = proxy for hand distance from camera
   const h = landmarks[0];
-  return Math.sqrt((h[0].x-h[12].x)**2 + (h[0].y-h[12].y)**2 + (h[0].z-h[12].z)**2);
+  return landmarkDist(h[0], h[12]);
 }
 
 function handAngle(landmarks) {
-  // Angle of the hand in the XY plane (for twist/rotation)
   const h = landmarks[0];
   return Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x);
 }
 
+// Pinch: thumb tip (4) touches index tip (8) — AND other fingers extended
 function isPinching(landmarks) {
   const h = landmarks[0];
-  const dist = Math.sqrt((h[4].x-h[8].x)**2 + (h[4].y-h[8].y)**2 + (h[4].z-h[8].z)**2);
-  return dist < 0.06;
+  const pinchDist = landmarkDist(h[4], h[8]);
+  // Other fingers must be extended (tips far from wrist)
+  const middleExt = landmarkDist(h[0], h[12]) > 0.25;
+  const ringExt = landmarkDist(h[0], h[16]) > 0.2;
+  const pinkyExt = landmarkDist(h[0], h[20]) > 0.18;
+  return pinchDist < 0.07 && middleExt && ringExt && pinkyExt;
 }
 
+// Fist: ALL fingertips curled close to wrist
 function isFist(landmarks) {
-  // All fingertips close to wrist = fist
   const h = landmarks[0];
-  let totalDist = 0;
+  let sum = 0;
   for (const tip of [4, 8, 12, 16, 20]) {
-    totalDist += Math.sqrt((h[tip].x-h[0].x)**2 + (h[tip].y-h[0].y)**2);
+    sum += landmarkDist(h[0], h[tip]);
   }
-  return totalDist < 1.2; // fist: fingers curled in
+  return sum < 1.0; // tight fist: all fingers curled
 }
 
 function processGestures(landmarks) {
   const h = landmarks[0];
-  const pinching = isPinching(landmarks);
-  const fist = isFist(landmarks);
+  const gs = gestureState;
   const size = handSize(landmarks);
   const angle = handAngle(landmarks);
-  const gs = gestureState;
 
-  let label = 'Open hand — idle';
+  const rawPinching = isPinching(landmarks);
+  const rawFist = isFist(landmarks);
+
+  // ── Hysteresis: require N consecutive frames to lock in, fewer to release ──
+  if (rawPinching && gs.currentGesture !== 'pinch') {
+    gs.gestureFrames++;
+    if (gs.gestureFrames >= gs.lockThreshold) {
+      gs.currentGesture = 'pinch';
+      gs.pinchStartSize = size; // capture reference on lock
+      gs.gestureFrames = 0;
+    }
+  } else if (rawFist && gs.currentGesture !== 'fist') {
+    gs.gestureFrames++;
+    if (gs.gestureFrames >= gs.lockThreshold) {
+      gs.currentGesture = 'fist';
+      gs.gestureFrames = 0;
+    }
+  } else if (!rawPinching && !rawFist) {
+    // Release faster — only 3 frames to exit
+    gs.gestureFrames++;
+    if (gs.gestureFrames >= 3) {
+      gs.currentGesture = 'open';
+      gs.gestureFrames = 0;
+    }
+  } else {
+    // Still matching current gesture — reset counter
+    gs.gestureFrames = Math.max(0, gs.gestureFrames - 1);
+  }
+
+  // ── Apply current gesture ──
+  let label = 'Open hand';
   controls.autoRotate = true;
 
-  if (pinching) {
-    // ── PINCH MODE: hold pinch + move hand to zoom ──
-    if (!gs.wasPinching) {
-      // Pinch just started — capture reference hand size
-      gs.pinchStartSize = size;
-    }
-
-    // sizeDelta > 0 = hand closer to cam = zoom IN
-    // sizeDelta < 0 = hand farther from cam = zoom OUT
+  if (gs.currentGesture === 'pinch') {
     const sizeDelta = size - gs.pinchStartSize;
-
-    // Direct distance scaling — no clamping, full range
-    // Pull hand all the way back = graph becomes a tiny speck
     const dist = camera.position.length();
     const targetDist = dist * (1 - sizeDelta * 3.5);
-    // Allow zooming out to 200 units (tiny speck) and in to 2 units (right up close)
     const newDist = Math.max(2, Math.min(200, targetDist));
-
     camera.position.normalize().multiplyScalar(newDist);
 
-    // Twist detection while pinching for rotation
+    // Twist while pinching = rotate
     const angleDelta = angle - gs.prevHandAngle;
-    if (Math.abs(angleDelta) > 0.02 && Math.abs(angleDelta) < 0.5) {
+    if (Math.abs(angleDelta) > 0.015 && Math.abs(angleDelta) < 0.5) {
       controls.autoRotate = false;
       controls.rotateLeft(angleDelta * 2);
     }
-
-    label = `PINCH — dist: ${newDist.toFixed(0)} · twist to rotate`;
-  } else if (fist) {
-    // ── FIST MODE: grab and drag to pan/move the graph ──
+    label = `PINCH — ${newDist.toFixed(0)}u`;
+  } else if (gs.currentGesture === 'fist') {
     controls.autoRotate = false;
     const dx = h[9].x - gs.prevWristX;
     const dy = h[9].y - gs.prevWristY;
-    if (Math.abs(dx) > 0.003 || Math.abs(dy) > 0.003) {
-      // Pan: move the camera target (what we're looking at)
-      const panSpeed = camera.position.length() * 0.015;
-      const right = new THREE.Vector3();
-      const up = new THREE.Vector3();
-      camera.getWorldDirection(new THREE.Vector3());
-      right.crossVectors(camera.getWorldDirection(new THREE.Vector3()), camera.up).normalize();
-      up.copy(camera.up).normalize();
+    if (Math.abs(dx) > 0.002 || Math.abs(dy) > 0.002) {
+      const panSpeed = camera.position.length() * 0.012;
+      const right = new THREE.Vector3().crossVectors(
+        camera.getWorldDirection(new THREE.Vector3()), camera.up
+      ).normalize();
       controls.target.addScaledVector(right, -dx * panSpeed);
-      controls.target.addScaledVector(up, dy * panSpeed);
+      controls.target.addScaledVector(camera.up, dy * panSpeed);
     }
-
-    label = `FIST — drag to pan`;
+    label = 'FIST — pan';
   }
 
-  // Track state for next frame
-  gs.wasPinching = pinching;
+  // Track previous for delta calculations
   gs.prevHandAngle = angle;
   gs.prevWristX = h[9].x;
   gs.prevWristY = h[9].y;
 
   document.getElementById('gesture-indicator').textContent = label;
 
-  // Draw hand skeleton
   handCanvas.style.display = 'block';
   drawHandSkeleton(landmarks);
 }
