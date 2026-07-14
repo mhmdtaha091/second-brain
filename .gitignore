@@ -18,10 +18,21 @@ venv/
 # Trash
 .trash/
 
-# Generated (rebuild with 'brain graph')
+# Personal notes — NEVER published. The public repo ships examples/notes/ only.
+/notes/
+
+# Generated graph (rebuild with 'brain graph') — contains indexed content from
+# the local workspace, including private projects. Never commit.
 viz/graph-data.json
+graph-data.json
+
+# Internal agent/workspace notes
+CLAUDE.md
+.claude/
 
 # Secrets
 *.key
 *.pem
+.env.*
+*.env
 encryption_key
